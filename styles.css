@@ -1,0 +1,156 @@
+/* Container */
+.html-preview-container {
+	position: relative;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	overflow: hidden;
+	margin: 12px 0;
+	background: var(--background-primary);
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* Toolbar */
+.html-preview-toolbar {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	padding: 4px 6px;
+	background: var(--background-secondary);
+	border-bottom: 1px solid var(--background-modifier-border);
+	min-height: 32px;
+	gap: 2px;
+}
+
+.html-preview-toolbar-btns {
+	display: flex;
+	gap: 1px;
+	align-items: center;
+	background: var(--background-primary);
+	border-radius: var(--radius-s);
+	padding: 2px;
+	border: 1px solid var(--background-modifier-border);
+}
+
+/* Buttons */
+.html-preview-container .html-preview-toolbar-btn {
+	width: 28px;
+	height: 26px;
+	padding: 0;
+	margin: 0;
+	border: none;
+	background: transparent;
+	cursor: pointer;
+	opacity: 0.5;
+	transition: all 0.15s ease;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: var(--radius-xs);
+	color: var(--text-normal);
+}
+
+.html-preview-toolbar-btn svg {
+	width: 15px;
+	height: 15px;
+	stroke-width: 1.8;
+}
+
+.html-preview-container .html-preview-toolbar-btn:hover {
+	opacity: 1;
+	background: var(--background-modifier-hover);
+}
+
+.html-preview-toolbar-btn:active {
+	transform: scale(0.92);
+}
+
+/* Copied feedback */
+.html-preview-toolbar-btn.html-preview-copied {
+	color: var(--text-success);
+	opacity: 1;
+}
+
+/* Iframe */
+.html-preview-iframe {
+	display: block;
+	width: 100%;
+	border: none;
+	background: var(--background-primary);
+	transition: height 0.2s ease;
+	min-height: 50px;
+	overflow: hidden;
+}
+
+.html-preview-iframe::-webkit-scrollbar {
+	display: none;
+	width: 0;
+	height: 0;
+}
+
+/* Resize handle */
+.html-preview-resize-handle {
+	display: none;
+	height: 8px;
+	cursor: ns-resize;
+	background: transparent;
+	position: relative;
+	touch-action: none;
+}
+
+.html-preview-container[data-sizing="manual"] .html-preview-resize-handle {
+	display: block;
+}
+
+.html-preview-resize-handle::after {
+	content: "";
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	width: 36px;
+	height: 4px;
+	border-radius: 2px;
+	background: var(--background-modifier-border);
+	opacity: 0;
+	transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.html-preview-resize-handle:hover::after {
+	opacity: 1;
+	background: var(--interactive-accent);
+}
+
+/* Fullscreen modal */
+.modal-content.html-preview-modal-content {
+	padding: 0;
+	height: 90vh;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.html-preview-modal-iframe {
+	width: 100%;
+	height: 80vh;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-primary);
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+	.html-preview-toolbar {
+		padding: 3px 4px;
+		min-height: 28px;
+	}
+
+	.html-preview-container .html-preview-toolbar-btn {
+		width: 24px;
+		height: 22px;
+	}
+
+	.html-preview-toolbar-btn svg {
+		width: 13px;
+		height: 13px;
+	}
+}

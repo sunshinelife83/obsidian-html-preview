@@ -1,0 +1,10 @@
+{
+	"id": "html-preview",
+	"name": "HTML-Preview",
+	"version": "1.0.2",
+	"minAppVersion": "0.15.0",
+	"description": "Render HTML code blocks as live, sandboxed webpages inside your notes.",
+	"author": "sunshinelife83",
+	"authorUrl": "https://github.com/sunshinelife83",
+	"isDesktopOnly": false
+}

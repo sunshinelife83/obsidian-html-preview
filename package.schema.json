@@ -1,0 +1,74 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "main": {
+      "type": "string"
+    },
+    "license": {
+      "type": "string"
+    },
+    "author": {
+      "type": ["string", "object"]
+    },
+    "repository": {
+      "type": ["string", "object"]
+    },
+    "bugs": {
+      "type": ["string", "object"]
+    },
+    "homepage": {
+      "type": "string"
+    },
+    "keywords": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "engines": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "scripts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "dependencies": {
+      "$ref": "#/$defs/dependencies"
+    },
+    "devDependencies": {
+      "$ref": "#/$defs/dependencies"
+    },
+    "peerDependencies": {
+      "$ref": "#/$defs/dependencies"
+    },
+    "optionalDependencies": {
+      "$ref": "#/$defs/dependencies"
+    }
+  },
+  "$defs": {
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}
