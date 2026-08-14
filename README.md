@@ -53,7 +53,7 @@ Strict isolation means previews cannot directly access Obsidian APIs, the host d
 Once listed in the Obsidian community plugin directory:
 
 1. Open **Settings > Community plugins**.
-2. Select **Browse** and search for **HTML Preview**.
+2. Select **Browse** and search for **HTML-Preview**.
 3. Install and enable the plugin.
 
 ### Manual installation
