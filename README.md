@@ -5,10 +5,13 @@ HTML Preview is an Obsidian plugin that renders `html-preview` code blocks as in
 ## Features
 
 - Runs HTML, CSS, and JavaScript in an isolated iframe.
-- Automatically follows the rendered document height.
-- Supports a manual height mode with pointer-based resizing.
+- Fits short pages automatically; longer pages start in a 16:9 scrolling viewport.
+- Supports reliable pointer resizing across the iframe, keyboard controls, and click-to-step buttons.
+- Supports readable desktop and responsive note-width viewport modes.
+- Provides true per-preview zoom from 50% to 200%.
+- Remembers each block's size, fit mode, viewport, and zoom across note rerenders and restarts.
 - Refreshes one preview from its toolbar or every open preview from the command palette.
-- Opens previews in a larger modal.
+- Opens previews in a browser-like fullscreen modal with a reload control.
 - Copies the original HTML source to the clipboard.
 - Works on desktop and mobile versions of Obsidian.
 
@@ -34,7 +37,11 @@ Create a fenced code block with the language `html-preview`:
 ```
 ````
 
-The preview toolbar provides refresh, fullscreen, copy, and sizing controls. In manual sizing mode, drag the handle below the preview to change its height.
+The preview toolbar shows the active viewport, zoom, and height mode, followed by controls for viewport, zoom, sizing, reload, fullscreen, and copy. New previews start with an 800 px desktop canvas and a 16:9 scrolling area based on the available note width. Once the page reports its height, content at or below **600 displayed pixels** expands to fit without scrolling; longer pages remain scrollable. If page content or zoom changes, this adaptive choice updates automatically.
+
+Switch to **Responsive** for the note-width layout. Zoom can be adjusted from 50% to 200%; enlarged previews scroll horizontally instead of reporting a fake zoom level. In manual sizing mode, drag the center grip for height or the bottom-right corner for width and height. Both controls also support the arrow keys (hold Shift for larger steps). The H and W minus/plus buttons adjust height and width by 50 px without dragging; the width plus button restores full width when it reaches the note edge. Double-click the center grip to return to automatic height, or click the corner to restore full width. Mouse resizing tracks the edge of the centered preview and can cross over the iframe. The toolbar wraps to fit narrow note panes, and plugin controls respect reduced-motion preferences.
+
+Change the short-page cutoff or choose **Always scroll** / **Always fit content** under **Settings → HTML-Preview**. The resizable-height setting applies to Always scroll; adaptive previews use 16:9. An older saved scrolling default stays scrolling; the old fit-by-default behavior migrates to adaptive, while explicit per-block choices remain unchanged. Clicking the height toggle or manually resizing a preview overrides adaptive height behavior for that block. Changes to an individual preview's height, width, fit mode, viewport, and zoom are saved in the plugin's `data.json`, not in the note. Saved sizes follow a note rename. Block matching uses the note path, HTML content, and code-block position; after moving or reordering identical blocks, matching may be ambiguous. When Obsidian cannot provide the code block's section position, the preview uses defaults instead of applying another block's saved size. Website theme controls remain inside the rendered webpage, where their original scripts and styles can manage them.
 
 Use **HTML Preview: Refresh all previews** from the command palette to reload every mounted preview.
 
@@ -45,6 +52,8 @@ Preview code runs with the iframe sandbox permissions `allow-scripts allow-forms
 HTML can still make external network requests through normal browser APIs. Only run code you understand, especially when opening notes from untrusted sources.
 
 Strict isolation means previews cannot directly access Obsidian APIs, the host document, or local vault resources that require same-origin access.
+
+To reduce breakage for sandboxed apps, the preview injects an in-memory `localStorage` / `sessionStorage` fallback when the browser blocks those APIs inside the iframe. That fallback is isolated to the preview and does not persist like normal browser storage.
 
 ## Installation
 

@@ -5,3 +5,6 @@ node_modules/
 .vscode/
 coverage/
 .kilo/
+
+# Local HTML examples are not part of the published plugin
+dhh.html
