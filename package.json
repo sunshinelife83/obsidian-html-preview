@@ -1,7 +1,7 @@
 {
 	"$schema": "./package.schema.json",
 	"name": "obsidian-html-preview",
-	"version": "1.0.2",
+	"version": "1.0.9",
 	"description": "Render HTML code blocks as live, sandboxed webpages inside Obsidian notes.",
 	"main": "main.js",
 	"author": "sunshinelife83",
