@@ -104,7 +104,7 @@ The production plugin consists of `main.js`, `manifest.json`, and `styles.css`. 
 3. The release workflow verifies the project and creates a draft GitHub release containing the required plugin files.
 4. Review the generated draft and publish it.
 
-Git tags must use the exact version number without a `v` prefix, for example `1.0.1`.
+Git tags must use the exact version number without a `v` prefix, for example `1.0.9`.
 
 ## License
 
