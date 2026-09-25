@@ -28,44 +28,267 @@ __export(main_exports, {
   default: () => HTMLPreviewPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian3 = require("obsidian");
-
-// src/HTMLPreviewProcessor.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/IframeBridge.ts
 var HEIGHT_REPORTER_ID = "html-preview-height-reporter";
 function getHeightReporterSource() {
   return `
-(function() {
-	var fallbackTimer;
-	function reportHeight() {
-		var h = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
-		if (h > 0) {
-			parent.postMessage({ type: "html-preview-height", height: h }, "*");
+	(function() {
+		var scheduled = false;
+		var lastHeight = 0;
+		var resizeObserver;
+		var mutationObserver;
+		var fallbackTimer;
+		var watchedImages = typeof WeakSet === "function" ? new WeakSet() : null;
+		var observedFonts;
+		var delayedTimers = [null, null, null];
+		var fullScanTimer;
+		var lastFullScanAt = -Infinity;
+		var lastDescendantHeight = 0;
+		var needsFullScan = true;
+		var FULL_SCAN_INTERVAL = 250;
+
+		function readNumber(value) {
+			return typeof value === "number" && isFinite(value) ? value : 0;
 		}
-	}
-	window.addEventListener("load", function() {
-		reportHeight();
-		if (typeof ResizeObserver === "function") {
-			var observer = new ResizeObserver(reportHeight);
-			observer.observe(document.body);
-			if (document.documentElement !== document.body) {
-				observer.observe(document.documentElement);
+
+		function readPixels(value) {
+			var parsed = parseFloat(value || "0");
+			return isFinite(parsed) ? parsed : 0;
+		}
+
+		function documentTop() {
+			if (!document.documentElement || typeof document.documentElement.getBoundingClientRect !== "function") return 0;
+			return readNumber(document.documentElement.getBoundingClientRect().top);
+		}
+
+		function elementRectBottom(element, top) {
+			if (!element || typeof element.getBoundingClientRect !== "function") return 0;
+
+			var rect = element.getBoundingClientRect();
+			return readNumber(rect.bottom) - top;
+		}
+
+		function elementRectHeight(element) {
+			if (!element || typeof element.getBoundingClientRect !== "function") return 0;
+
+			var rect = element.getBoundingClientRect();
+			return readNumber(rect.height);
+		}
+
+		function scrollOverflowHeight(element) {
+			if (!element) return 0;
+
+			var scrollHeight = readNumber(element.scrollHeight);
+			var clientHeight = readNumber(element.clientHeight);
+			return scrollHeight > clientHeight ? scrollHeight : 0;
+		}
+
+		function bodyHeight() {
+			if (!document.body) return 0;
+
+			var height = Math.max(
+				readNumber(document.body.scrollHeight),
+				readNumber(document.body.offsetHeight),
+				elementRectHeight(document.body),
+				elementRectBottom(document.body, documentTop())
+			);
+
+			if (typeof window.getComputedStyle === "function") {
+				var styles = window.getComputedStyle(document.body);
+				height += readPixels(styles.marginTop) + readPixels(styles.marginBottom);
 			}
-			window.addEventListener("unload", function() { observer.disconnect(); }, { once: true });
-		} else {
-			fallbackTimer = window.setInterval(reportHeight, 500);
-			window.setTimeout(function() { window.clearInterval(fallbackTimer); }, 10000);
+
+			return height;
 		}
-	});
-})();
-`;
+
+		function documentOverflowHeight() {
+			return Math.max(
+				scrollOverflowHeight(document.scrollingElement),
+				scrollOverflowHeight(document.documentElement),
+				scrollOverflowHeight(document.body)
+			);
+		}
+
+		function descendantBottomHeight() {
+			if (!document.body || typeof document.body.querySelectorAll !== "function") return 0;
+
+			var top = documentTop();
+			var maxBottom = 0;
+			var elements = document.body.querySelectorAll("*");
+
+			for (var i = 0; i < elements.length; i++) {
+				var element = elements[i];
+				if (typeof window.getComputedStyle === "function") {
+					var styles = window.getComputedStyle(element);
+					if (styles.display === "none") continue;
+				}
+
+				maxBottom = Math.max(maxBottom, elementRectBottom(element, top));
+			}
+
+			return maxBottom;
+		}
+
+		function measureHeight() {
+			var regularHeight = Math.max(bodyHeight(), documentOverflowHeight());
+			var now = Date.now();
+			if (needsFullScan && now - lastFullScanAt >= FULL_SCAN_INTERVAL) {
+				lastDescendantHeight = descendantBottomHeight();
+				lastFullScanAt = now;
+				needsFullScan = false;
+			} else if (needsFullScan && !fullScanTimer) {
+				fullScanTimer = window.setTimeout(function() {
+					fullScanTimer = null;
+					scheduleReport();
+				}, Math.max(0, FULL_SCAN_INTERVAL - (now - lastFullScanAt)));
+			}
+			return Math.ceil(Math.max(regularHeight, lastDescendantHeight));
+		}
+
+		function reportHeight() {
+			scheduled = false;
+
+			var height = measureHeight();
+			if (height > 0 && height !== lastHeight) {
+				lastHeight = height;
+				parent.postMessage({ type: "html-preview-height", height: height }, "*");
+			}
+		}
+
+		function scheduleReport() {
+			needsFullScan = true;
+			if (scheduled) return;
+			scheduled = true;
+
+			if (typeof window.requestAnimationFrame === "function") {
+				window.requestAnimationFrame(reportHeight);
+			} else {
+				window.setTimeout(reportHeight, 16);
+			}
+		}
+
+		function scheduleDelayedReports() {
+			scheduleReport();
+			var delays = [50, 250, 1000];
+			for (var i = 0; i < delays.length; i++) {
+				if (delayedTimers[i] !== null) continue;
+				(function(index) {
+					delayedTimers[index] = window.setTimeout(function() {
+						delayedTimers[index] = null;
+						scheduleReport();
+					}, delays[index]);
+				})(i);
+			}
+		}
+
+		function watchImage(image) {
+			if (watchedImages && watchedImages.has(image)) return;
+			if (watchedImages) watchedImages.add(image);
+
+			if (!image.complete) {
+				image.addEventListener("load", scheduleDelayedReports, { once: true });
+				image.addEventListener("error", scheduleDelayedReports, { once: true });
+			}
+		}
+
+		function watchImages(root) {
+			if (!root) return;
+			if (root.nodeType === 1 && root.tagName === "IMG") watchImage(root);
+			if (typeof root.querySelectorAll !== "function") return;
+
+			var images = root.querySelectorAll("img");
+			for (var i = 0; i < images.length; i++) {
+				watchImage(images[i]);
+			}
+		}
+
+		function observeLayoutChanges() {
+			if (typeof ResizeObserver === "function") {
+				resizeObserver = new ResizeObserver(scheduleDelayedReports);
+				if (document.body) resizeObserver.observe(document.body);
+				if (document.documentElement) resizeObserver.observe(document.documentElement);
+			}
+
+			if (typeof MutationObserver === "function" && document.documentElement) {
+				mutationObserver = new MutationObserver(function(mutations) {
+					for (var i = 0; i < mutations.length; i++) {
+						var addedNodes = mutations[i].addedNodes;
+						for (var j = 0; j < addedNodes.length; j++) {
+							watchImages(addedNodes[j]);
+						}
+					}
+					scheduleDelayedReports();
+				});
+				mutationObserver.observe(document.documentElement, {
+					attributes: true,
+					characterData: true,
+					childList: true,
+					subtree: true
+				});
+			}
+
+			if (!resizeObserver && !mutationObserver) {
+				fallbackTimer = window.setInterval(scheduleReport, 500);
+			}
+		}
+
+		function observeFonts() {
+			observedFonts = document.fonts;
+			if (!observedFonts) return;
+
+			if (observedFonts.ready && typeof observedFonts.ready.then === "function") {
+				observedFonts.ready.then(scheduleDelayedReports).catch(function() {});
+			}
+
+			if (typeof observedFonts.addEventListener === "function") {
+				observedFonts.addEventListener("loadingdone", scheduleDelayedReports);
+				observedFonts.addEventListener("loadingerror", scheduleDelayedReports);
+			}
+		}
+
+		function start() {
+			watchImages(document);
+			observeLayoutChanges();
+			observeFonts();
+			scheduleDelayedReports();
+		}
+
+		function cleanup() {
+			window.removeEventListener("resize", scheduleDelayedReports);
+			window.clearInterval(fallbackTimer);
+			window.clearTimeout(fullScanTimer);
+			for (var i = 0; i < delayedTimers.length; i++) window.clearTimeout(delayedTimers[i]);
+
+			if (resizeObserver) resizeObserver.disconnect();
+			if (mutationObserver) mutationObserver.disconnect();
+
+			if (observedFonts && typeof observedFonts.removeEventListener === "function") {
+				observedFonts.removeEventListener("loadingdone", scheduleDelayedReports);
+				observedFonts.removeEventListener("loadingerror", scheduleDelayedReports);
+			}
+		}
+
+		window.addEventListener("resize", scheduleDelayedReports);
+		window.addEventListener("load", function() {
+			watchImages(document);
+			scheduleDelayedReports();
+		});
+		window.addEventListener("unload", cleanup, { once: true });
+
+		if (document.readyState === "loading") {
+			document.addEventListener("DOMContentLoaded", start, { once: true });
+		} else {
+			start();
+		}
+	})();
+	`;
 }
 function isHeightMessage(data) {
   if (typeof data !== "object" || data === null) return false;
   const candidate = data;
-  return candidate.type === "html-preview-height" && typeof candidate.height === "number" && Number.isFinite(candidate.height);
+  return candidate.type === "html-preview-height" && typeof candidate.height === "number" && Number.isFinite(candidate.height) && candidate.height > 0;
 }
 function registerHeightHandler(iframe, handler) {
   const listener = (event) => {
@@ -80,23 +303,90 @@ function registerHeightHandler(iframe, handler) {
 
 // src/DocumentBuilder.ts
 var PREVIEW_STYLE_ID = "html-preview-base-styles";
+var STORAGE_SHIM_ID = "html-preview-storage-shim";
 var PREVIEW_STYLES = `
-*,*::before,*::after{box-sizing:border-box}
-html,body{overflow-x:hidden}
-body{margin:0;padding:8px;font-family:var(--font-text,sans-serif);background:transparent;color:var(--text-normal,#ccc)}
-a{color:var(--text-accent,#7c5cbf)}
-::-webkit-scrollbar{display:none;width:0;height:0}
+:where(html,body){background:transparent}
+`;
+var STORAGE_SHIM_SOURCE = `
+(() => {
+	function createStorage() {
+		let store = Object.create(null);
+
+		return {
+			get length() {
+				return Object.keys(store).length;
+			},
+			clear() {
+				store = Object.create(null);
+			},
+			getItem(key) {
+				const normalizedKey = String(key);
+				return Object.prototype.hasOwnProperty.call(store, normalizedKey)
+					? store[normalizedKey]
+					: null;
+			},
+			key(index) {
+				const keys = Object.keys(store);
+				return keys[index] || null;
+			},
+			removeItem(key) {
+				delete store[String(key)];
+			},
+			setItem(key, value) {
+				store[String(key)] = String(value);
+			},
+		};
+	}
+
+	function installStorageFallback(name) {
+		try {
+			const storage = window[name];
+			const probeKey = "__html_preview_storage_probe__";
+			storage.setItem(probeKey, "1");
+			storage.removeItem(probeKey);
+			return;
+		} catch {
+			const shim = createStorage();
+			try {
+				Object.defineProperty(window, name, {
+					value: shim,
+					configurable: true,
+					enumerable: true,
+					writable: false,
+				});
+			} catch {
+				try {
+					window[name] = shim;
+				} catch {
+					/* Ignore browsers that block redefining storage properties. */
+				}
+			}
+		}
+	}
+
+	installStorageFallback("localStorage");
+	installStorageFallback("sessionStorage");
+})();
 `;
 var PREVIEW_STYLE_MARKUP = `<style id="${PREVIEW_STYLE_ID}">${PREVIEW_STYLES}</style>`;
+var STORAGE_SHIM_MARKUP = `<script id="${STORAGE_SHIM_ID}">${STORAGE_SHIM_SOURCE}<\/script>`;
 var HEIGHT_REPORTER_MARKUP = `<script id="${HEIGHT_REPORTER_ID}">${getHeightReporterSource()}<\/script>`;
-function appendTrustedMarkup(parent, markup) {
+function getTrustedMarkupNodes(parent, markup) {
   const tagName = parent.tagName.toLowerCase();
   const parsed = new DOMParser().parseFromString(
     tagName === "head" ? `<head>${markup}</head>` : `<body>${markup}</body>`,
     "text/html"
   );
   const fragment = tagName === "head" ? parsed.head : parsed.body;
-  parent.append(...Array.from(fragment.childNodes));
+  return Array.from(fragment.childNodes);
+}
+function appendTrustedMarkup(parent, markup) {
+  parent.append(...getTrustedMarkupNodes(parent, markup));
+}
+function insertTrustedMarkupBefore(parent, markup, referenceNode) {
+  for (const node of getTrustedMarkupNodes(parent, markup)) {
+    parent.insertBefore(node, referenceNode);
+  }
 }
 function removeElementsById(document, id) {
   for (const element of Array.from(document.querySelectorAll(`#${id}`))) element.remove();
@@ -115,6 +405,13 @@ function buildPreviewDocument(source) {
       '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
     );
   }
+  removeElementsById(parsedDocument, STORAGE_SHIM_ID);
+  const firstHeadScript = parsedDocument.head.querySelector("script");
+  if (firstHeadScript) {
+    insertTrustedMarkupBefore(parsedDocument.head, STORAGE_SHIM_MARKUP, firstHeadScript);
+  } else {
+    appendTrustedMarkup(parsedDocument.head, STORAGE_SHIM_MARKUP);
+  }
   removeElementsById(parsedDocument, PREVIEW_STYLE_ID);
   appendTrustedMarkup(parsedDocument.head, PREVIEW_STYLE_MARKUP);
   removeElementsById(parsedDocument, HEIGHT_REPORTER_ID);
@@ -123,66 +420,194 @@ function buildPreviewDocument(source) {
 ${parsedDocument.documentElement.outerHTML}`;
 }
 
+// src/PreviewModal.ts
+var import_obsidian = require("obsidian");
+var HTMLPreviewModal = class extends import_obsidian.Modal {
+  constructor(app, source) {
+    super(app);
+    this.source = source;
+  }
+  onOpen() {
+    this.modalEl.addClass("html-preview-modal");
+    this.contentEl.addClass("html-preview-modal-content");
+    const toolbar = this.contentEl.createDiv({ cls: "html-preview-modal-toolbar" });
+    toolbar.createSpan({ cls: "html-preview-modal-title", text: "HTML preview" });
+    const reloadButton = toolbar.createEl("button", {
+      cls: "clickable-icon html-preview-modal-btn",
+      attr: { type: "button", title: "Reload preview", "aria-label": "Reload preview" }
+    });
+    (0, import_obsidian.setIcon)(reloadButton, "refresh-cw");
+    const iframe = this.contentEl.createEl("iframe", {
+      cls: "html-preview-modal-iframe",
+      attr: {
+        sandbox: "allow-scripts allow-forms",
+        scrolling: "auto",
+        title: "Fullscreen HTML preview"
+      }
+    });
+    const reload = () => {
+      iframe.srcdoc = buildPreviewDocument(this.source);
+    };
+    reloadButton.addEventListener("click", reload);
+    reload();
+  }
+  onClose() {
+    this.modalEl.removeClass("html-preview-modal");
+    this.contentEl.empty();
+  }
+};
+
 // src/PreviewSizing.ts
 var MIN_PREVIEW_HEIGHT = 50;
-var MAX_PREVIEW_HEIGHT = 2e3;
-function clampHeight(height) {
-  return Math.min(Math.max(height, MIN_PREVIEW_HEIGHT), MAX_PREVIEW_HEIGHT);
+var MAX_MANUAL_PREVIEW_HEIGHT = 2e3;
+var AUTO_HEIGHT_SAFETY_LIMIT = 5e4;
+var MIN_PREVIEW_WIDTH = 320;
+var DEFAULT_PREVIEW_ASPECT_RATIO = 16 / 9;
+var MIN_SHORT_PAGE_THRESHOLD = 200;
+var MAX_SHORT_PAGE_THRESHOLD = 1200;
+var MIN_ZOOM = 0.5;
+var MAX_ZOOM = 2;
+var ZOOM_STEP = 0.1;
+function clampToRange(height, maxHeight) {
+  if (!Number.isFinite(height)) return MIN_PREVIEW_HEIGHT;
+  return Math.min(Math.max(height, MIN_PREVIEW_HEIGHT), maxHeight);
 }
-function applyHeight(iframe, height) {
-  if (!Number.isFinite(height) || height <= 0) return;
-  iframe.style.height = `${clampHeight(height)}px`;
+function clampManualHeight(height) {
+  return clampToRange(height, MAX_MANUAL_PREVIEW_HEIGHT);
+}
+function clampAutoHeight(height) {
+  return clampToRange(height, AUTO_HEIGHT_SAFETY_LIMIT);
+}
+function getAspectRatioHeight(width) {
+  return clampManualHeight(Math.round(width / DEFAULT_PREVIEW_ASPECT_RATIO));
+}
+function clampShortPageThreshold(threshold) {
+  if (!Number.isFinite(threshold)) return 600;
+  return Math.min(MAX_SHORT_PAGE_THRESHOLD, Math.max(MIN_SHORT_PAGE_THRESHOLD, Math.round(threshold)));
+}
+function fitsShortPage(height, scale, threshold) {
+  return Number.isFinite(height) && height > 0 && Number.isFinite(scale) && scale > 0 && Math.ceil(height * scale) <= clampShortPageThreshold(threshold);
+}
+function clampZoom(zoom) {
+  if (!Number.isFinite(zoom)) return 1;
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.round(zoom * 100) / 100));
+}
+function clampPreviewWidth(width, availableWidth) {
+  const maximum = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : MIN_PREVIEW_WIDTH;
+  const minimum = Math.min(MIN_PREVIEW_WIDTH, maximum);
+  const candidate = Number.isFinite(width) ? width : minimum;
+  return Math.min(maximum, Math.max(minimum, candidate));
 }
 function getDefaultHeight(config) {
-  return clampHeight(config.defaultHeight);
+  return clampManualHeight(config.defaultHeight);
 }
 
 // src/Toolbar.ts
-var import_obsidian = require("obsidian");
-function createButton(parent, icon, label, onClick, disposers) {
+var import_obsidian2 = require("obsidian");
+function createButton(parent, icon, label, onClick, disposers, className = "") {
   const button = parent.createEl("button", {
-    cls: "clickable-icon html-preview-toolbar-btn",
+    cls: `clickable-icon html-preview-toolbar-btn ${className}`.trim(),
     attr: { "aria-label": label, title: label, type: "button" }
   });
-  (0, import_obsidian.setIcon)(button, icon);
+  (0, import_obsidian2.setIcon)(button, icon);
   button.addEventListener("click", onClick);
   disposers.push(() => button.removeEventListener("click", onClick));
   return button;
 }
-function createToolbar(parentEl, initialMode, callbacks) {
+function setButtonAppearance(button, icon, label) {
+  button.empty();
+  (0, import_obsidian2.setIcon)(button, icon);
+  button.setAttribute("aria-label", label);
+  button.title = label;
+}
+function createToolbar(parentEl, initialMode, initialViewportMode, initialZoom, callbacks) {
   const toolbar = parentEl.createDiv({ cls: "html-preview-toolbar" });
+  const status = toolbar.createDiv({
+    cls: "html-preview-toolbar-status",
+    attr: { "aria-live": "polite" }
+  });
   const buttons = toolbar.createDiv({ cls: "html-preview-toolbar-btns" });
   const disposers = [];
-  createButton(buttons, "refresh-cw", "Refresh preview", () => callbacks.onRefresh(), disposers);
-  createButton(buttons, "maximize-2", "Fullscreen preview", () => callbacks.onFullscreen(), disposers);
+  const viewGroup = buttons.createDiv({ cls: "html-preview-toolbar-group" });
+  let viewportMode = initialViewportMode;
+  const viewportButton = createButton(viewGroup, "monitor", "Use responsive note-width viewport", () => {
+    callbacks.onViewportModeChange(viewportMode === "desktop" ? "responsive" : "desktop");
+  }, disposers);
+  const zoomOutButton = createButton(
+    viewGroup,
+    "minus",
+    "Zoom out",
+    () => callbacks.onZoomChange(-1),
+    disposers
+  );
+  const zoomButton = viewGroup.createEl("button", {
+    cls: "html-preview-zoom-value",
+    attr: {
+      "aria-label": "Reset preview zoom to 100%",
+      title: "Reset preview zoom to 100%",
+      type: "button"
+    }
+  });
+  const resetZoom = () => callbacks.onZoomChange(0);
+  zoomButton.addEventListener("click", resetZoom);
+  disposers.push(() => zoomButton.removeEventListener("click", resetZoom));
+  const zoomInButton = createButton(
+    viewGroup,
+    "plus",
+    "Zoom in",
+    () => callbacks.onZoomChange(1),
+    disposers
+  );
+  const actionGroup = buttons.createDiv({ cls: "html-preview-toolbar-group" });
+  let mode = initialMode;
+  const sizeButton = createButton(actionGroup, "scan", "Fit the full content height", () => {
+    callbacks.onSizingModeChange(mode === "auto" ? "manual" : "auto");
+  }, disposers);
+  createButton(actionGroup, "refresh-cw", "Reload preview", () => callbacks.onRefresh(), disposers);
+  createButton(actionGroup, "maximize-2", "Open fullscreen preview", () => callbacks.onFullscreen(), disposers);
   let feedbackTimer;
-  const copyButton = createButton(buttons, "copy", "Copy HTML source", () => {
+  const copyButton = createButton(actionGroup, "copy", "Copy HTML source", () => {
     void navigator.clipboard.writeText(callbacks.getSource()).then(() => {
       copyButton.addClass("html-preview-copied");
+      setButtonAppearance(copyButton, "check", "HTML copied");
       window.clearTimeout(feedbackTimer);
       feedbackTimer = window.setTimeout(() => {
         copyButton.removeClass("html-preview-copied");
+        setButtonAppearance(copyButton, "copy", "Copy HTML source");
       }, 1200);
     }).catch(() => {
-      new import_obsidian.Notice("Could not copy HTML source");
+      new import_obsidian2.Notice("Could not copy HTML source");
     });
-  }, disposers);
-  let mode = initialMode;
-  const sizeButton = createButton(buttons, "scan", "Auto sizing (click for manual)", () => {
-    callbacks.onSizingModeChange(mode === "auto" ? "manual" : "auto");
   }, disposers);
   const setSizingMode = (nextMode) => {
     mode = nextMode;
     const auto = mode === "auto";
-    const label = auto ? "Auto sizing (click for manual)" : "Manual sizing (click for auto)";
-    sizeButton.empty();
-    (0, import_obsidian.setIcon)(sizeButton, auto ? "scan" : "move-vertical");
-    sizeButton.setAttribute("aria-label", label);
-    sizeButton.title = label;
+    const label = auto ? "Fit height is on. Click for a resizable scroll area" : "Resizable height is on. Click to fit the full content";
+    setButtonAppearance(sizeButton, auto ? "scan" : "move-vertical", label);
+    sizeButton.toggleClass("is-active", !auto);
+    sizeButton.setAttribute("aria-pressed", String(!auto));
+  };
+  const setViewportMode = (nextMode) => {
+    viewportMode = nextMode;
+    const desktop = viewportMode === "desktop";
+    const label = desktop ? "Desktop viewport is on. Click for responsive note width" : "Responsive note width is on. Click for desktop viewport";
+    setButtonAppearance(viewportButton, desktop ? "monitor" : "smartphone", label);
+    viewportButton.toggleClass("is-active", desktop);
+    viewportButton.setAttribute("aria-pressed", String(desktop));
+  };
+  const setZoom = (zoom, atMinimum, atMaximum) => {
+    zoomButton.setText(`${Math.round(zoom * 100)}%`);
+    zoomOutButton.disabled = atMinimum;
+    zoomInButton.disabled = atMaximum;
   };
   setSizingMode(initialMode);
+  setViewportMode(initialViewportMode);
+  setZoom(initialZoom, false, false);
   return {
     setSizingMode,
+    setViewportMode,
+    setZoom,
+    setStatus: (nextStatus) => status.setText(nextStatus),
     dispose: () => {
       window.clearTimeout(feedbackTimer);
       for (const dispose of disposers) dispose();
@@ -192,82 +617,464 @@ function createToolbar(parentEl, initialMode, callbacks) {
 
 // src/types.ts
 var DEFAULT_CONFIG = {
-  autoHeight: true,
-  defaultHeight: 300
+  defaultSizingMode: "adaptive",
+  shortPageThreshold: 600,
+  defaultHeight: 500,
+  defaultViewportMode: "desktop",
+  defaultZoom: 1,
+  desktopViewportWidth: 800,
+  responsiveViewportBreakpoint: 480
 };
+function resolveDefaultSizingMode(savedMode, legacyAutoHeight) {
+  if (savedMode === "adaptive" || savedMode === "manual" || savedMode === "auto") return savedMode;
+  if (legacyAutoHeight === false) return "manual";
+  return DEFAULT_CONFIG.defaultSizingMode;
+}
 
 // src/HTMLPreviewProcessor.ts
-function createPreview(parentEl, source, app, config = DEFAULT_CONFIG) {
+var nextPreviewId = 0;
+function setIframeScrolling(iframe, enabled) {
+  iframe.setAttribute("scrolling", enabled ? "auto" : "no");
+  iframe.style.overflow = enabled ? "auto" : "hidden";
+}
+function getPositivePixelValue(value, fallback) {
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.max(1, Math.round(value));
+}
+function createPreview(parentEl, source, app, config = DEFAULT_CONFIG, options) {
+  var _a, _b, _c, _d, _e;
   const wrapper = parentEl.createDiv({ cls: "html-preview-container" });
-  let mode = config.autoHeight ? "auto" : "manual";
-  let manualHeight = getDefaultHeight(config);
+  const restored = options == null ? void 0 : options.initialState;
+  let sizingPreference = (_a = restored == null ? void 0 : restored.mode) != null ? _a : config.defaultSizingMode;
+  let mode = sizingPreference === "auto" ? "auto" : "manual";
+  let viewportMode = (_b = restored == null ? void 0 : restored.viewportMode) != null ? _b : config.defaultViewportMode;
+  let zoom = clampZoom((_c = restored == null ? void 0 : restored.zoom) != null ? _c : config.defaultZoom);
+  let manualHeight = clampManualHeight((_d = restored == null ? void 0 : restored.manualHeight) != null ? _d : getDefaultHeight(config));
+  let manualWidth = (_e = restored == null ? void 0 : restored.manualWidth) != null ? _e : null;
+  let initialized = false;
+  const saveState = () => {
+    var _a2;
+    if (!initialized) return;
+    (_a2 = options == null ? void 0 : options.onStateChange) == null ? void 0 : _a2.call(options, { mode: sizingPreference, viewportMode, zoom, manualHeight, manualWidth });
+  };
   let lastReportedHeight = 0;
+  let currentScale = 1;
+  let currentRawWidth = config.desktopViewportWidth;
   let disposed = false;
+  let activePointerId = null;
+  let activeResizeKind = null;
+  let cornerDragged = false;
+  let startX = 0;
+  let startY = 0;
+  let startWidth = 0;
+  let dragHandle = null;
+  let dragChanged = false;
+  let startHeight = 0;
+  let lastLayoutWidth = 0;
   let iframe;
+  let viewportEl;
+  let stageEl;
+  let resizeHandle;
+  let cornerHandle;
+  let heightMinusButton;
+  let heightPlusButton;
+  let widthMinusButton;
+  let widthPlusButton;
+  let resizeLabel;
+  let toolbar;
+  const sizeButtonDisposers = [];
+  const getAvailableWidth = () => getPositivePixelValue(
+    viewportEl.clientWidth || wrapper.clientWidth || parentEl.clientWidth,
+    config.desktopViewportWidth
+  );
+  const getMaximumWrapperWidth = () => {
+    var _a2;
+    return getPositivePixelValue(
+      parentEl.clientWidth || ((_a2 = parentEl.parentElement) == null ? void 0 : _a2.clientWidth) || wrapper.clientWidth,
+      wrapper.clientWidth || config.desktopViewportWidth
+    );
+  };
+  const getEffectiveViewportMode = (availableWidth = getAvailableWidth()) => {
+    if (viewportMode === "desktop" && availableWidth <= config.responsiveViewportBreakpoint) {
+      return "responsive";
+    }
+    return viewportMode;
+  };
+  const getRawViewportWidth = (availableWidth, effectiveMode) => {
+    if (effectiveMode === "responsive") return availableWidth;
+    return Math.max(config.desktopViewportWidth, availableWidth);
+  };
+  const getScaledHeight = (rawHeight) => Math.max(
+    MIN_PREVIEW_HEIGHT,
+    Math.ceil(rawHeight * currentScale)
+  );
+  const updateStatus = () => {
+    const effectiveMode = getEffectiveViewportMode();
+    const viewportLabel = effectiveMode === "desktop" ? `Desktop ${currentRawWidth}px` : `Responsive ${currentRawWidth}px`;
+    const heightLabel = sizingPreference === "adaptive" ? mode === "auto" ? "Fit short page" : `16:9 scroll \xB7 ${Math.round(manualHeight)}px high` : mode === "auto" ? "Fit height" : `${Math.round(manualHeight)}px high`;
+    toolbar.setStatus(`${viewportLabel} \xB7 ${Math.round(zoom * 100)}% \xB7 ${heightLabel}`);
+  };
+  const updateResizeHandle = () => {
+    const roundedHeight = Math.round(manualHeight);
+    const visibleWidth = manualWidth === null ? null : clampPreviewWidth(manualWidth, getMaximumWrapperWidth());
+    const widthLabel = visibleWidth === null ? "Full width" : `${Math.round(visibleWidth)}px wide`;
+    resizeLabel.setText(`Height ${roundedHeight}px \xB7 ${widthLabel}`);
+    resizeHandle.setAttribute("aria-valuenow", String(roundedHeight));
+    resizeHandle.setAttribute("aria-valuetext", `${roundedHeight} pixels`);
+    heightMinusButton.disabled = manualHeight <= MIN_PREVIEW_HEIGHT;
+    heightPlusButton.disabled = manualHeight >= MAX_MANUAL_PREVIEW_HEIGHT;
+    const width = visibleWidth != null ? visibleWidth : getMaximumWrapperWidth();
+    widthMinusButton.disabled = width <= Math.min(MIN_PREVIEW_WIDTH, getMaximumWrapperWidth());
+    widthPlusButton.disabled = visibleWidth === null || width >= getMaximumWrapperWidth();
+    cornerHandle.setAttribute("aria-label", `Reset preview to full width; drag or use arrow keys to resize. ${widthLabel}, ${roundedHeight}px high`);
+  };
+  const applyStageWidth = (availableWidth) => {
+    const renderedWidth = Math.max(1, Math.ceil(currentRawWidth * currentScale));
+    stageEl.style.width = `${renderedWidth}px`;
+    stageEl.toggleClass("is-centered", renderedWidth < availableWidth);
+  };
+  const syncAutoScrolling = () => {
+    setIframeScrolling(iframe, lastReportedHeight > AUTO_HEIGHT_SAFETY_LIMIT);
+  };
+  const applyManualSizing = () => {
+    manualHeight = clampManualHeight(manualHeight);
+    iframe.style.height = `${manualHeight / currentScale}px`;
+    stageEl.style.height = `${manualHeight}px`;
+    viewportEl.style.height = `${manualHeight}px`;
+    updateResizeHandle();
+    updateStatus();
+  };
+  const applyAutoSizing = (height) => {
+    const rawHeight = clampAutoHeight(height);
+    const renderedHeight = getScaledHeight(rawHeight);
+    syncAutoScrolling();
+    iframe.style.height = `${rawHeight}px`;
+    stageEl.style.height = `${renderedHeight}px`;
+    viewportEl.style.height = `${renderedHeight}px`;
+    updateStatus();
+  };
+  const applyViewportLayout = () => {
+    const availableWidth = getAvailableWidth();
+    const effectiveViewportMode = getEffectiveViewportMode(availableWidth);
+    currentRawWidth = getRawViewportWidth(availableWidth, effectiveViewportMode);
+    const fitScale = Math.min(availableWidth / currentRawWidth, 1);
+    currentScale = fitScale * zoom;
+    iframe.style.width = `${currentRawWidth}px`;
+    iframe.style.transform = Math.abs(currentScale - 1) < 1e-3 ? "" : `scale(${currentScale})`;
+    applyStageWidth(availableWidth);
+    if (sizingPreference === "adaptive") {
+      if (lastReportedHeight > 0 && fitsShortPage(lastReportedHeight, currentScale, config.shortPageThreshold)) {
+        if (mode !== "auto") setSizingMode("auto");
+        else applyAutoSizing(lastReportedHeight);
+      } else {
+        manualHeight = getAspectRatioHeight(availableWidth);
+        if (mode !== "manual") setSizingMode("manual");
+        else applyManualSizing();
+      }
+    } else if (mode === "manual") {
+      applyManualSizing();
+    } else if (lastReportedHeight > 0) {
+      applyAutoSizing(lastReportedHeight);
+    } else {
+      updateStatus();
+    }
+  };
+  const applyWrapperWidth = () => {
+    if (manualWidth === null) {
+      wrapper.style.width = "";
+      wrapper.style.marginInline = "";
+      return;
+    }
+    wrapper.style.width = `${Math.round(clampPreviewWidth(manualWidth, getMaximumWrapperWidth()))}px`;
+    wrapper.style.marginInline = "auto";
+  };
   const setSizingMode = (nextMode) => {
+    const previousMode = mode;
     mode = nextMode;
     wrapper.dataset.sizing = mode;
     toolbar.setSizingMode(mode);
     if (mode === "manual") {
-      manualHeight = clampHeight(iframe.offsetHeight || manualHeight);
-      applyHeight(iframe, manualHeight);
-    } else if (lastReportedHeight > 0) {
-      applyHeight(iframe, lastReportedHeight);
+      if (previousMode === "auto" && sizingPreference !== "adaptive") {
+        const visibleHeight = viewportEl.getBoundingClientRect().height || viewportEl.clientHeight;
+        manualHeight = clampManualHeight(visibleHeight || manualHeight);
+      }
+      setIframeScrolling(iframe, true);
+      applyManualSizing();
+    } else {
+      syncAutoScrolling();
+      if (lastReportedHeight > 0) applyAutoSizing(lastReportedHeight);
+      else updateStatus();
     }
+  };
+  const chooseSizingMode = (nextMode) => {
+    sizingPreference = nextMode;
+    setSizingMode(nextMode);
+    saveState();
+  };
+  const setViewportMode = (nextMode) => {
+    viewportMode = nextMode;
+    toolbar.setViewportMode(viewportMode);
+    applyViewportLayout();
+    saveState();
+  };
+  const setZoom = (direction) => {
+    zoom = direction === 0 ? 1 : clampZoom(zoom + direction * ZOOM_STEP);
+    toolbar.setZoom(zoom, zoom <= MIN_ZOOM, zoom >= MAX_ZOOM);
+    applyViewportLayout();
+    saveState();
   };
   const refresh = () => {
     if (disposed) return;
     iframe.srcdoc = buildPreviewDocument(source);
-    if (mode === "manual") applyHeight(iframe, manualHeight);
+    if (sizingPreference === "adaptive") {
+      lastReportedHeight = 0;
+      applyViewportLayout();
+      return;
+    }
+    if (mode === "manual") {
+      setIframeScrolling(iframe, true);
+      applyManualSizing();
+    } else {
+      syncAutoScrolling();
+    }
   };
-  const toolbar = createToolbar(wrapper, mode, {
+  const onWindowBlur = () => stopResize();
+  const stopResize = (event) => {
+    var _a2;
+    if (event && activePointerId !== event.pointerId) return;
+    const pointerId = activePointerId;
+    activePointerId = null;
+    activeResizeKind = null;
+    delete wrapper.dataset.resizing;
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", stopResize);
+    window.removeEventListener("pointercancel", stopResize);
+    window.removeEventListener("blur", onWindowBlur);
+    dragHandle == null ? void 0 : dragHandle.removeEventListener("lostpointercapture", stopResize);
+    if (pointerId !== null && ((_a2 = dragHandle == null ? void 0 : dragHandle.hasPointerCapture) == null ? void 0 : _a2.call(dragHandle, pointerId))) {
+      dragHandle.releasePointerCapture(pointerId);
+    }
+    dragHandle = null;
+    if (dragChanged) saveState();
+    dragChanged = false;
+  };
+  const onPointerMove = (event) => {
+    if (activePointerId !== event.pointerId || activeResizeKind === null) return;
+    const deltaX = event.clientX - startX;
+    const deltaY = event.clientY - startY;
+    if (!deltaX && !deltaY) return;
+    dragChanged = true;
+    if (Math.abs(deltaY) > (activeResizeKind === "corner" ? 3 : 0)) sizingPreference = "manual";
+    if (activeResizeKind === "corner" && (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3)) {
+      cornerDragged = true;
+    }
+    manualHeight = clampManualHeight(startHeight + deltaY);
+    if (activeResizeKind === "corner") {
+      const width = startWidth + 2 * deltaX;
+      manualWidth = width >= getMaximumWrapperWidth() ? null : width;
+      applyWrapperWidth();
+      applyViewportLayout();
+    } else {
+      applyManualSizing();
+    }
+  };
+  const beginResize = (event, kind) => {
+    var _a2;
+    if (mode !== "manual" || activePointerId !== null || event.button !== 0) return;
+    event.preventDefault();
+    activePointerId = event.pointerId;
+    activeResizeKind = kind;
+    cornerDragged = false;
+    startX = event.clientX;
+    startY = event.clientY;
+    startWidth = wrapper.getBoundingClientRect().width || getMaximumWrapperWidth();
+    startHeight = manualHeight;
+    dragChanged = false;
+    dragHandle = event.currentTarget;
+    wrapper.dataset.resizing = kind;
+    dragHandle.addEventListener("lostpointercapture", stopResize);
+    (_a2 = dragHandle.setPointerCapture) == null ? void 0 : _a2.call(dragHandle, event.pointerId);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+    window.addEventListener("blur", onWindowBlur);
+  };
+  const onHeightPointerDown = (event) => beginResize(event, "height");
+  const onCornerPointerDown = (event) => {
+    event.stopPropagation();
+    beginResize(event, "corner");
+  };
+  const onResizeKeyDown = (event) => {
+    if (mode !== "manual") return;
+    const step = event.shiftKey ? 50 : 10;
+    if (event.key === "ArrowUp") manualHeight -= step;
+    else if (event.key === "ArrowDown") manualHeight += step;
+    else if (event.key === "Home") manualHeight = MIN_PREVIEW_HEIGHT;
+    else if (event.key === "End") manualHeight = MAX_MANUAL_PREVIEW_HEIGHT;
+    else return;
+    event.preventDefault();
+    sizingPreference = "manual";
+    applyManualSizing();
+    saveState();
+  };
+  const onCornerKeyDown = (event) => {
+    if (mode !== "manual") return;
+    event.stopPropagation();
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      resetWidth();
+      return;
+    }
+    const step = event.shiftKey ? 50 : 10;
+    const currentWidth = manualWidth === null ? getMaximumWrapperWidth() : clampPreviewWidth(manualWidth, getMaximumWrapperWidth());
+    if (event.key === "ArrowLeft") manualWidth = currentWidth - step;
+    else if (event.key === "ArrowRight") manualWidth = currentWidth + step >= getMaximumWrapperWidth() ? null : currentWidth + step;
+    else if (event.key === "ArrowUp") {
+      manualHeight -= step;
+      sizingPreference = "manual";
+    } else if (event.key === "ArrowDown") {
+      manualHeight += step;
+      sizingPreference = "manual";
+    } else if (event.key === "Home") manualWidth = MIN_PREVIEW_WIDTH;
+    else if (event.key === "End") manualWidth = null;
+    else return;
+    event.preventDefault();
+    applyWrapperWidth();
+    applyViewportLayout();
+    saveState();
+  };
+  const resetWidth = () => {
+    manualWidth = null;
+    applyWrapperWidth();
+    applyViewportLayout();
+    updateResizeHandle();
+    saveState();
+  };
+  const onCornerClick = () => {
+    if (cornerDragged) {
+      cornerDragged = false;
+      return;
+    }
+    resetWidth();
+  };
+  const onCornerDoubleClick = (event) => {
+    event.stopPropagation();
+    resetWidth();
+  };
+  const onResizeDoubleClick = () => chooseSizingMode("auto");
+  const onHostResize = () => {
+    if (disposed) return;
+    if (manualWidth !== null) applyWrapperWidth();
+    updateResizeHandle();
+    const width = getAvailableWidth();
+    if (width === lastLayoutWidth) return;
+    lastLayoutWidth = width;
+    applyViewportLayout();
+  };
+  toolbar = createToolbar(wrapper, mode, viewportMode, zoom, {
     onRefresh: refresh,
     onFullscreen: () => new HTMLPreviewModal(app, source).open(),
-    onSizingModeChange: setSizingMode,
+    onSizingModeChange: chooseSizingMode,
+    onViewportModeChange: setViewportMode,
+    onZoomChange: setZoom,
     getSource: () => source
   });
-  iframe = wrapper.createEl("iframe", {
+  viewportEl = wrapper.createDiv({ cls: "html-preview-viewport" });
+  viewportEl.id = `html-preview-viewport-${++nextPreviewId}`;
+  stageEl = viewportEl.createDiv({ cls: "html-preview-stage" });
+  iframe = stageEl.createEl("iframe", {
     cls: "html-preview-iframe",
     attr: {
       sandbox: "allow-scripts allow-forms",
       loading: "lazy",
+      scrolling: mode === "manual" ? "auto" : "no",
       title: "HTML preview"
     }
   });
-  const resizeHandle = wrapper.createDiv({
+  const resizeBar = wrapper.createDiv({ cls: "html-preview-resize-bar" });
+  resizeHandle = resizeBar.createDiv({
     cls: "html-preview-resize-handle",
-    attr: { "aria-hidden": "true" }
+    attr: {
+      role: "separator",
+      tabindex: "0",
+      "aria-label": "Preview height; drag or use arrow keys to resize",
+      "aria-controls": viewportEl.id,
+      "aria-orientation": "horizontal",
+      "aria-valuemin": String(MIN_PREVIEW_HEIGHT),
+      "aria-valuemax": String(MAX_MANUAL_PREVIEW_HEIGHT)
+    }
   });
+  resizeHandle.createSpan({ cls: "html-preview-height-grip", attr: { "aria-hidden": "true" } });
+  resizeLabel = resizeHandle.createSpan({ cls: "html-preview-resize-label", attr: { "aria-hidden": "true" } });
+  const sizeControls = resizeBar.createDiv({ cls: "html-preview-size-controls" });
+  sizeControls.createSpan({ cls: "html-preview-size-axis", text: "H", attr: { "aria-hidden": "true" } });
+  const createSizeButton = (label, symbol, onClick) => {
+    const button = sizeControls.createEl("button", {
+      cls: "html-preview-size-btn",
+      text: symbol,
+      attr: { type: "button", "aria-label": label, title: label, "aria-controls": viewportEl.id }
+    });
+    button.addEventListener("click", onClick);
+    sizeButtonDisposers.push(() => button.removeEventListener("click", onClick));
+    return button;
+  };
+  heightMinusButton = createSizeButton("Decrease preview height by 50 pixels", "\u2212", () => {
+    manualHeight -= 50;
+    sizingPreference = "manual";
+    applyManualSizing();
+    saveState();
+  });
+  heightPlusButton = createSizeButton("Increase preview height by 50 pixels", "+", () => {
+    manualHeight += 50;
+    sizingPreference = "manual";
+    applyManualSizing();
+    saveState();
+  });
+  sizeControls.createSpan({ cls: "html-preview-size-axis", text: "W", attr: { "aria-hidden": "true" } });
+  widthMinusButton = createSizeButton("Decrease preview width by 50 pixels", "\u2212", () => {
+    manualWidth = (manualWidth === null ? getMaximumWrapperWidth() : clampPreviewWidth(manualWidth, getMaximumWrapperWidth())) - 50;
+    applyWrapperWidth();
+    applyViewportLayout();
+    saveState();
+  });
+  widthPlusButton = createSizeButton("Increase preview width by 50 pixels", "+", () => {
+    const width = clampPreviewWidth(manualWidth != null ? manualWidth : getMaximumWrapperWidth(), getMaximumWrapperWidth()) + 50;
+    manualWidth = width >= getMaximumWrapperWidth() ? null : width;
+    applyWrapperWidth();
+    applyViewportLayout();
+    saveState();
+  });
+  cornerHandle = resizeBar.createDiv({
+    cls: "html-preview-corner-handle",
+    attr: {
+      role: "button",
+      tabindex: "0",
+      "aria-controls": viewportEl.id,
+      title: "Drag or use arrow keys to resize; click for full width"
+    }
+  });
+  applyWrapperWidth();
+  setViewportMode(viewportMode);
   setSizingMode(mode);
+  toolbar.setZoom(zoom, zoom <= MIN_ZOOM, zoom >= MAX_ZOOM);
+  updateResizeHandle();
+  initialized = true;
   const unregisterHeightHandler = registerHeightHandler(iframe, (height) => {
-    lastReportedHeight = clampHeight(height);
-    if (mode === "auto") applyHeight(iframe, lastReportedHeight);
+    lastReportedHeight = height;
+    if (sizingPreference === "adaptive") applyViewportLayout();
+    else if (mode === "auto") applyAutoSizing(height);
   });
-  let activePointerId = null;
-  let startY = 0;
-  let startHeight = 0;
-  const stopResize = () => {
-    activePointerId = null;
-    window.removeEventListener("pointermove", onPointerMove);
-    window.removeEventListener("pointerup", stopResize);
-    window.removeEventListener("pointercancel", stopResize);
-  };
-  const onPointerMove = (event) => {
-    if (activePointerId !== event.pointerId) return;
-    manualHeight = clampHeight(startHeight + event.clientY - startY);
-    applyHeight(iframe, manualHeight);
-  };
-  const onPointerDown = (event) => {
-    if (mode !== "manual" || activePointerId !== null) return;
-    event.preventDefault();
-    activePointerId = event.pointerId;
-    startY = event.clientY;
-    startHeight = iframe.offsetHeight;
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", stopResize);
-    window.addEventListener("pointercancel", stopResize);
-  };
-  resizeHandle.addEventListener("pointerdown", onPointerDown);
+  const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(onHostResize) : null;
+  resizeObserver == null ? void 0 : resizeObserver.observe(viewportEl);
+  resizeObserver == null ? void 0 : resizeObserver.observe(parentEl);
+  window.addEventListener("resize", onHostResize);
+  resizeHandle.addEventListener("pointerdown", onHeightPointerDown);
+  resizeHandle.addEventListener("keydown", onResizeKeyDown);
+  resizeHandle.addEventListener("dblclick", onResizeDoubleClick);
+  cornerHandle.addEventListener("pointerdown", onCornerPointerDown);
+  cornerHandle.addEventListener("keydown", onCornerKeyDown);
+  cornerHandle.addEventListener("click", onCornerClick);
+  cornerHandle.addEventListener("dblclick", onCornerDoubleClick);
   refresh();
   return {
     refresh,
@@ -275,39 +1082,21 @@ function createPreview(parentEl, source, app, config = DEFAULT_CONFIG) {
       if (disposed) return;
       disposed = true;
       stopResize();
-      resizeHandle.removeEventListener("pointerdown", onPointerDown);
+      resizeObserver == null ? void 0 : resizeObserver.disconnect();
+      window.removeEventListener("resize", onHostResize);
+      resizeHandle.removeEventListener("pointerdown", onHeightPointerDown);
+      resizeHandle.removeEventListener("keydown", onResizeKeyDown);
+      resizeHandle.removeEventListener("dblclick", onResizeDoubleClick);
+      cornerHandle.removeEventListener("pointerdown", onCornerPointerDown);
+      cornerHandle.removeEventListener("keydown", onCornerKeyDown);
+      cornerHandle.removeEventListener("click", onCornerClick);
+      cornerHandle.removeEventListener("dblclick", onCornerDoubleClick);
       unregisterHeightHandler();
+      for (const disposeButton of sizeButtonDisposers) disposeButton();
       toolbar.dispose();
     }
   };
 }
-var HTMLPreviewModal = class extends import_obsidian2.Modal {
-  constructor(app, html) {
-    super(app);
-    this.html = html;
-  }
-  onOpen() {
-    this.contentEl.addClass("html-preview-modal-content");
-    const iframe = this.contentEl.createEl("iframe", {
-      cls: "html-preview-modal-iframe",
-      attr: {
-        sandbox: "allow-scripts allow-forms",
-        title: "Fullscreen HTML preview"
-      }
-    });
-    iframe.srcdoc = buildPreviewDocument(this.html);
-    this.cleanup = registerHeightHandler(iframe, (height) => {
-      const maxHeight = Math.max(window.innerHeight - 80, 100);
-      iframe.style.height = `${Math.min(clampHeight(height), maxHeight)}px`;
-    });
-  }
-  onClose() {
-    var _a;
-    (_a = this.cleanup) == null ? void 0 : _a.call(this);
-    this.cleanup = void 0;
-    this.contentEl.empty();
-  }
-};
 
 // src/PreviewRegistry.ts
 var PreviewRegistry = class {
@@ -327,8 +1116,201 @@ var PreviewRegistry = class {
   }
 };
 
+// src/PreviewStateStore.ts
+function isValidState(value) {
+  if (!value || typeof value !== "object") return false;
+  const state = value;
+  return (state.mode === "auto" || state.mode === "manual" || state.mode === "adaptive") && typeof state.manualHeight === "number" && Number.isFinite(state.manualHeight) && state.manualHeight > 0 && (state.manualWidth === null || typeof state.manualWidth === "number" && Number.isFinite(state.manualWidth) && state.manualWidth > 0) && (state.viewportMode === "desktop" || state.viewportMode === "responsive") && typeof state.zoom === "number" && Number.isFinite(state.zoom) && state.zoom > 0;
+}
+function isValidLine(line) {
+  return typeof line === "number" && Number.isSafeInteger(line) && line >= 0;
+}
+function hashSource(source) {
+  let hash = 2166136261;
+  for (let i = 0; i < source.length; i++) {
+    hash = Math.imul(hash ^ source.charCodeAt(i), 16777619);
+  }
+  return `${source.length.toString(36)}:${(hash >>> 0).toString(36)}`;
+}
+var PreviewStateStore = class {
+  constructor(stored, save, debounceMs = 400) {
+    this.save = save;
+    this.debounceMs = debounceMs;
+    this.records = [];
+    this.active = /* @__PURE__ */ new Set();
+    this.nextId = 1;
+    this.revision = 0;
+    this.savedRevision = 0;
+    this.timer = null;
+    this.saving = null;
+    this.waiting = [];
+    if (!Array.isArray(stored)) return;
+    const ids = /* @__PURE__ */ new Set();
+    for (const item of stored) {
+      if (!item || typeof item !== "object") continue;
+      const record = item;
+      if (!isValidLine(record.id) || record.id === 0 || ids.has(record.id) || typeof record.path !== "string" || !record.path || !isValidLine(record.lineStart) || typeof record.sourceHash !== "string" || !record.sourceHash || !isValidState(record.state)) continue;
+      ids.add(record.id);
+      this.records.push({
+        id: record.id,
+        path: record.path,
+        lineStart: record.lineStart,
+        sourceHash: record.sourceHash,
+        state: { ...record.state }
+      });
+      this.nextId = Math.max(this.nextId, record.id + 1);
+    }
+  }
+  serialize() {
+    return this.records.map((record) => ({ ...record, state: { ...record.state } }));
+  }
+  bind(path, source, lineStart) {
+    var _a;
+    if (!path || !isValidLine(lineStart)) {
+      return { onStateChange: () => {
+      }, release: () => {
+      } };
+    }
+    const sourceHash = hashSource(source);
+    const claimed = new Set([...this.active].filter((binding2) => binding2.lineStart !== lineStart && binding2.record).map((binding2) => binding2.record.id));
+    const available = this.records.filter((record2) => record2.path === path && !claimed.has(record2.id));
+    const closest = (records) => records.sort(
+      (a, b) => Math.abs(a.lineStart - lineStart) - Math.abs(b.lineStart - lineStart) || a.id - b.id
+    )[0];
+    let record = (_a = closest(available.filter((entry) => entry.sourceHash === sourceHash))) != null ? _a : available.find((entry) => entry.lineStart === lineStart);
+    const binding = { path, lineStart, sourceHash, record };
+    this.active.add(binding);
+    const initialState = record ? { ...record.state } : void 0;
+    if (record && (record.lineStart !== lineStart || record.sourceHash !== sourceHash)) {
+      record.lineStart = lineStart;
+      record.sourceHash = sourceHash;
+      this.requestSave();
+    }
+    return {
+      initialState,
+      onStateChange: (state) => {
+        if (!this.active.has(binding) || !isValidState(state)) return;
+        if (!record) {
+          record = {
+            id: this.nextId++,
+            path: binding.path,
+            lineStart,
+            sourceHash,
+            state: { ...state }
+          };
+          binding.record = record;
+          this.records.push(record);
+        } else {
+          if (Object.keys(state).every((key) => state[key] === record.state[key])) return;
+          record.state = { ...state };
+        }
+        this.requestSave();
+      },
+      release: () => {
+        this.active.delete(binding);
+      }
+    };
+  }
+  rename(oldPath, newPath) {
+    if (!oldPath || !newPath || oldPath === newPath) return;
+    let changed = false;
+    for (const record of this.records) {
+      if (record.path !== oldPath) continue;
+      record.path = newPath;
+      changed = true;
+    }
+    for (const binding of this.active) {
+      if (binding.path === oldPath) binding.path = newPath;
+    }
+    if (changed) this.requestSave();
+  }
+  requestSave() {
+    this.revision++;
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.flush().catch((error) => console.error("HTML preview: failed to save state", error));
+    }, this.debounceMs);
+  }
+  saveDebounced() {
+    this.requestSave();
+    return new Promise((resolve, reject) => {
+      this.waiting.push({ revision: this.revision, resolve, reject });
+    });
+  }
+  flush() {
+    var _a;
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    if (!this.saving && this.revision > this.savedRevision) {
+      this.saving = this.writePending().finally(() => {
+        this.saving = null;
+      });
+    }
+    return (_a = this.saving) != null ? _a : Promise.resolve();
+  }
+  async writePending() {
+    while (this.savedRevision < this.revision) {
+      const revision = this.revision;
+      try {
+        await this.save(this.serialize());
+      } catch (error) {
+        for (const waiter of this.waiting.splice(0)) waiter.reject(error);
+        throw error;
+      }
+      this.savedRevision = revision;
+      this.waiting = this.waiting.filter((waiter) => {
+        if (waiter.revision > revision) return true;
+        waiter.resolve();
+        return false;
+      });
+    }
+  }
+};
+
+// src/Settings.ts
+var import_obsidian3 = require("obsidian");
+var HTMLPreviewSettingTab = class extends import_obsidian3.PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "These defaults apply to blocks without a saved view. Each preview can still be adjusted from its toolbar."
+    });
+    new import_obsidian3.Setting(containerEl).setName("Default height behavior").setDesc("Automatically fit short pages and scroll long pages, or always start in a chosen mode.").addDropdown((dropdown) => dropdown.addOption("adaptive", "Fit short pages, scroll long pages").addOption("manual", "Always scroll").addOption("auto", "Always fit content").setValue(this.plugin.settings.defaultSizingMode).onChange(async (value) => {
+      this.plugin.settings.defaultSizingMode = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian3.Setting(containerEl).setName("Short page cutoff").setDesc("In adaptive mode, fit pages no taller than this many displayed pixels. Longer pages scroll in a 16:9 viewport.").addSlider((slider) => slider.setLimits(MIN_SHORT_PAGE_THRESHOLD, MAX_SHORT_PAGE_THRESHOLD, 50).setDynamicTooltip().setValue(this.plugin.settings.shortPageThreshold).onChange(async (value) => {
+      this.plugin.settings.shortPageThreshold = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian3.Setting(containerEl).setName("Default viewport").setDesc("Desktop preserves desktop navigation and breakpoints. Responsive uses the full note width.").addDropdown((dropdown) => dropdown.addOption("desktop", "Desktop").addOption("responsive", "Responsive").setValue(this.plugin.settings.defaultViewportMode).onChange(async (value) => {
+      this.plugin.settings.defaultViewportMode = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian3.Setting(containerEl).setName("Desktop viewport width").setDesc("A smaller width is easier to read; a larger width is closer to a full browser window.").addSlider((slider) => slider.setLimits(769, 1440, 32).setDynamicTooltip().setValue(this.plugin.settings.desktopViewportWidth).onChange(async (value) => {
+      this.plugin.settings.desktopViewportWidth = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian3.Setting(containerEl).setName("Default zoom").setDesc("Adjust the initial visual size. Use the toolbar controls for individual previews.").addSlider((slider) => slider.setLimits(MIN_ZOOM, MAX_ZOOM, ZOOM_STEP).setDynamicTooltip().setValue(this.plugin.settings.defaultZoom).onChange(async (value) => {
+      this.plugin.settings.defaultZoom = value;
+      await this.plugin.saveSettings();
+    }));
+    new import_obsidian3.Setting(containerEl).setName("Resizable preview height").setDesc("Starting height when Always scroll is selected. Adaptive previews use a 16:9 viewport instead.").addSlider((slider) => slider.setLimits(200, 1200, 50).setDynamicTooltip().setValue(this.plugin.settings.defaultHeight).onChange(async (value) => {
+      this.plugin.settings.defaultHeight = value;
+      await this.plugin.saveSettings();
+    }));
+  }
+};
+
 // src/main.ts
-var PreviewRenderChild = class extends import_obsidian3.MarkdownRenderChild {
+var PreviewRenderChild = class extends import_obsidian4.MarkdownRenderChild {
   constructor(containerEl, controller, onDispose) {
     super(containerEl);
     this.controller = controller;
@@ -339,15 +1321,30 @@ var PreviewRenderChild = class extends import_obsidian3.MarkdownRenderChild {
     this.onDispose();
   }
 };
-var HTMLPreviewPlugin = class extends import_obsidian3.Plugin {
+var HTMLPreviewPlugin = class extends import_obsidian4.Plugin {
   constructor() {
     super(...arguments);
     this.previews = new PreviewRegistry();
+    this.settings = { ...DEFAULT_CONFIG };
   }
-  onload() {
+  async onload() {
+    await this.loadSettings();
+    this.addSettingTab(new HTMLPreviewSettingTab(this.app, this));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      this.previewStates.rename(oldPath, file.path);
+    }));
     this.registerMarkdownCodeBlockProcessor("html-preview", (source, el, ctx) => {
-      const preview = createPreview(el, source, this.app);
-      ctx.addChild(new PreviewRenderChild(el, preview, this.previews.add(preview)));
+      var _a;
+      const binding = this.previewStates.bind(ctx.sourcePath, source, (_a = ctx.getSectionInfo(el)) == null ? void 0 : _a.lineStart);
+      const preview = createPreview(el, source, this.app, this.settings, {
+        initialState: binding.initialState,
+        onStateChange: binding.onStateChange
+      });
+      const unregister = this.previews.add(preview);
+      ctx.addChild(new PreviewRenderChild(el, preview, () => {
+        unregister();
+        binding.release();
+      }));
     });
     this.addCommand({
       id: "refresh-all",
@@ -355,7 +1352,32 @@ var HTMLPreviewPlugin = class extends import_obsidian3.Plugin {
       callback: () => this.previews.refreshAll()
     });
   }
+  saveSettings() {
+    return this.previewStates.saveDebounced();
+  }
   onunload() {
     this.previews.disposeAll();
+    if (this.previewStates) {
+      void this.previewStates.flush().catch(
+        (error) => console.error("HTML preview: failed to save state on unload", error)
+      );
+    }
+  }
+  async loadSettings() {
+    var _a, _b, _c, _d, _e, _f;
+    const saved = await this.loadData();
+    this.settings = {
+      defaultSizingMode: resolveDefaultSizingMode(saved == null ? void 0 : saved.defaultSizingMode, saved == null ? void 0 : saved.autoHeight),
+      shortPageThreshold: clampShortPageThreshold((_a = saved == null ? void 0 : saved.shortPageThreshold) != null ? _a : DEFAULT_CONFIG.shortPageThreshold),
+      defaultHeight: (_b = saved == null ? void 0 : saved.defaultHeight) != null ? _b : DEFAULT_CONFIG.defaultHeight,
+      defaultViewportMode: (_c = saved == null ? void 0 : saved.defaultViewportMode) != null ? _c : DEFAULT_CONFIG.defaultViewportMode,
+      defaultZoom: (_d = saved == null ? void 0 : saved.defaultZoom) != null ? _d : DEFAULT_CONFIG.defaultZoom,
+      desktopViewportWidth: (_e = saved == null ? void 0 : saved.desktopViewportWidth) != null ? _e : DEFAULT_CONFIG.desktopViewportWidth,
+      responsiveViewportBreakpoint: (_f = saved == null ? void 0 : saved.responsiveViewportBreakpoint) != null ? _f : DEFAULT_CONFIG.responsiveViewportBreakpoint
+    };
+    this.previewStates = new PreviewStateStore(
+      saved == null ? void 0 : saved.previewStates,
+      (states) => this.saveData({ ...this.settings, previewStates: states })
+    );
   }
 };
